@@ -1,0 +1,16 @@
+torch==2.8.0
+transformers==4.56.2
+datasets==5.0.0
+pyarrow==24.0.0
+tqdm==4.68.0
+flash-attn==2.8.3
+mamba-ssm==2.3.2.post1
+causal-conv1d==1.6.2.post1
+flash-linear-attention==0.5.0
+accelerate==1.13.0
+einops==0.8.2
+packaging
+ninja
+wheel
+setuptools
+psutil
