@@ -7,6 +7,10 @@ import math
 import os
 import time
 from pathlib import Path
+import sys
+
+_CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_CODE_ROOT / "shared"))
 from typing import Any
 
 os.environ["HF_HOME"] = "/home/vrintern/tmp/.hf-cache"
@@ -69,9 +73,16 @@ def token_windows(tokenizer, texts, total_length: int, max_windows: int):
 
 
 def _mamba_layers(model):
-    for layer in getattr(model.model, "layers", []):
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        layers = getattr(getattr(model, "backbone", None), "layers", [])
+    for idx, layer in enumerate(layers):
         mamba = getattr(layer, "mamba", None)
+        if mamba is None:
+            mamba = getattr(layer, "mixer", None)
         if mamba is not None:
+            if not hasattr(mamba, "layer_idx"):
+                mamba.layer_idx = idx
             yield mamba
 
 

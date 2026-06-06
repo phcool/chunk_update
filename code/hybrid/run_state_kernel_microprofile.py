@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+
+_CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_CODE_ROOT / "shared"))
 
 import torch
 import triton

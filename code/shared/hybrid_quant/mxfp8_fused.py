@@ -52,6 +52,18 @@ class MXFP8StateCache:
     initialized: bool = False
 
 
+def _iter_mamba_modules(model):
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        layers = getattr(getattr(model, "backbone", None), "layers", [])
+    for idx, layer in enumerate(layers):
+        mamba = getattr(layer, "mamba", None)
+        if mamba is None:
+            mamba = getattr(layer, "mixer", None)
+        if mamba is not None and hasattr(mamba, "step"):
+            yield idx, mamba
+
+
 @triton.jit
 def _quantize_state_kernel(
     state_ptr,
@@ -542,10 +554,11 @@ def mxfp8_selective_state_update_ablation(cache, x, dt, A, B, C, D=None, mode: s
 
 
 def enable_mxfp8_fused_state_cache(model, group_size: int = 32):
-    for layer in getattr(model.model, "layers", []):
-        mamba = getattr(layer, "mamba", None)
+    for layer_idx, mamba in _iter_mamba_modules(model):
         if mamba is None or getattr(mamba, "_mxfp8_fused_patched", False):
             continue
+        if not hasattr(mamba, "layer_idx"):
+            mamba.layer_idx = layer_idx
         mamba._mxfp8_fused_group_size = group_size
         mamba._mxfp8_fused_caches = {}
         original_step = mamba.step
@@ -566,8 +579,7 @@ def enable_mxfp8_fused_state_cache(model, group_size: int = 32):
 
 
 def initialize_mxfp8_fused_state_cache(model):
-    for layer in getattr(model.model, "layers", []):
-        mamba = getattr(layer, "mamba", None)
+    for _, mamba in _iter_mamba_modules(model):
         if mamba is None or not getattr(mamba, "_mxfp8_fused_patched", False):
             continue
         mamba._mxfp8_fused_enabled = True
@@ -575,8 +587,7 @@ def initialize_mxfp8_fused_state_cache(model):
 
 
 def quantize_current_mamba_states(model, inference_params):
-    for layer in getattr(model.model, "layers", []):
-        mamba = getattr(layer, "mamba", None)
+    for _, mamba in _iter_mamba_modules(model):
         if mamba is None or not getattr(mamba, "_mxfp8_fused_enabled", False):
             continue
         states = inference_params.key_value_memory_dict.get(mamba.layer_idx)
@@ -612,8 +623,7 @@ def replace_mamba_states_with_mxfp8(model, inference_params):
     BF16/FP16 final state, then this function converts that state and removes
     the original SSM tensor from the inference cache tuple.
     """
-    for layer in getattr(model.model, "layers", []):
-        mamba = getattr(layer, "mamba", None)
+    for _, mamba in _iter_mamba_modules(model):
         if mamba is None or not getattr(mamba, "_mxfp8_fused_enabled", False):
             continue
         states = inference_params.key_value_memory_dict.get(mamba.layer_idx)

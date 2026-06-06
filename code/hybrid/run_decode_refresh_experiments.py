@@ -6,6 +6,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import sys
+
+_CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_CODE_ROOT / "shared"))
 
 
 def parse_ints(value: str) -> list[int]:
@@ -74,7 +78,11 @@ def task_command(args, task, gpu: int, output: Path):
     ]
     if task["metric"] == "latency":
         argv.extend(["--batch-sizes", str(task["batch_size"])])
-    code = "import sys, run_decode_ppl_latency_mamba_refresh as r; sys.argv=%r; r.main()" % argv
+    module_dir = Path(__file__).resolve().parent
+    code = (
+        "import sys; sys.path.insert(0, %r); "
+        "import run_decode_ppl_latency_mamba_refresh as r; sys.argv=%r; r.main()"
+    ) % (str(module_dir), argv)
     return [sys.executable, "-c", code]
 
 
