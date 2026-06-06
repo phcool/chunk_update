@@ -549,7 +549,6 @@ def enable_mxfp8_fused_state_cache(model, group_size: int = 32):
         mamba._mxfp8_fused_group_size = group_size
         mamba._mxfp8_fused_caches = {}
         original_step = mamba.step
-        mamba._mxfp8_original_step = original_step
 
         def make_step_with_mxfp8(base_step):
             def step_with_mxfp8(self, hidden_states, conv_state, ssm_state):
@@ -586,45 +585,6 @@ def quantize_current_mamba_states(model, inference_params):
         cache = allocate_mxfp8_state_cache(ssm_state, group_size=mamba._mxfp8_fused_group_size)
         quantize_state_into_cache(ssm_state, cache)
         mamba._mxfp8_fused_caches[id(ssm_state)] = cache
-
-
-def dequantize_state_cache(cache: MXFP8StateCache, dtype: torch.dtype) -> torch.Tensor:
-    scale = torch.exp2(cache.scale_e8m0.to(torch.float32) - 127.0)
-    q = cache.q_state.to(torch.float32)
-    grouped = q.reshape(*q.shape[:-1], -1, cache.group_size)
-    state = (grouped * scale.unsqueeze(-1)).reshape_as(q)
-    return state.to(dtype)
-
-
-def clone_state_cache(cache: MXFP8StateCache) -> MXFP8StateCache:
-    return MXFP8StateCache(
-        q_state=cache.q_state.clone(),
-        scale_e8m0=cache.scale_e8m0.clone(),
-        group_size=cache.group_size,
-        initialized=cache.initialized,
-    )
-
-
-def replace_mamba_states_with_mxfp8(model, inference_params):
-    """Replace decode SSM state tensors with MXFP8 caches.
-
-    This is intended for decode-only experiments: prefill can still produce a
-    BF16/FP16 final state, then this function converts that state and removes
-    the original SSM tensor from the inference cache tuple.
-    """
-    for layer in getattr(model.model, "layers", []):
-        mamba = getattr(layer, "mamba", None)
-        if mamba is None or not getattr(mamba, "_mxfp8_fused_enabled", False):
-            continue
-        states = inference_params.key_value_memory_dict.get(mamba.layer_idx)
-        if states is None:
-            continue
-        conv_state, ssm_state = states[:2]
-        if isinstance(ssm_state, MXFP8StateCache):
-            continue
-        cache = allocate_mxfp8_state_cache(ssm_state, group_size=mamba._mxfp8_fused_group_size)
-        quantize_state_into_cache(ssm_state, cache)
-        inference_params.key_value_memory_dict[mamba.layer_idx] = (conv_state, cache)
 
 
 def _mxfp8_step(self, hidden_states, conv_state, ssm_state):
@@ -683,13 +643,7 @@ def _mxfp8_step(self, hidden_states, conv_state, ssm_state):
             self._mxfp8_fused_caches[id(ssm_state)] = cache
         return cache
 
-    if isinstance(ssm_state, MXFP8StateCache):
-        cache = ssm_state
-    else:
-        cache = _profile_section(self, "mamba_cache_lookup_s", get_or_init_cache)
-    recorder = getattr(self, "_mxfp8_chunk_recorder", None)
-    if recorder is not None and hidden_states.shape[1] == 1:
-        recorder.setdefault(self.layer_idx, []).append(hidden_states.detach())
+    cache = _profile_section(self, "mamba_cache_lookup_s", get_or_init_cache)
     y = _profile_section(
         self,
         "mamba_mxfp8_state_update_kernel_s",
