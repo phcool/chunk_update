@@ -10,7 +10,7 @@ from itertools import product
 from pathlib import Path
 
 
-CONFIGS = list(product(["normal", "fp8", "int4"], ["normal", "mxfp8"]))
+CONFIGS = list(product(["normal", "fp8", "int4"], ["normal", "mxfp8_fused"]))
 
 
 def parse_gpu_list(value: str):
@@ -43,22 +43,60 @@ def main():
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--latency-warmup", type=int, default=1)
     parser.add_argument("--latency-repeats", type=int, default=3)
+    parser.add_argument("--prefill-chunk-size", type=int, default=256)
     parser.add_argument("--mamba-group-size", type=int, default=32)
+    parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     gpus = parse_gpu_list(args.gpus)
+    contexts = parse_gpu_list(args.context_lengths)
+    batches = parse_gpu_list(args.batch_sizes)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    procs = []
+    tasks = []
+    metrics = {x.strip() for x in args.metrics.split(",") if x.strip()}
+    for kv_mode, mamba_mode in CONFIGS:
+        if "ppl" in metrics:
+            for ctx in contexts:
+                tasks.append(
+                    {
+                        "name": f"ppl_kv{kv_mode}_mamba{mamba_mode}_ctx{ctx}",
+                        "kv_mode": kv_mode,
+                        "mamba_mode": mamba_mode,
+                        "metrics": "ppl",
+                        "context_lengths": ctx,
+                        "batch_sizes": "1",
+                        "prefill_chunk_size": "0",
+                    }
+                )
+        if "latency" in metrics:
+            for ctx in contexts:
+                for batch in batches:
+                    tasks.append(
+                        {
+                            "name": f"latency_kv{kv_mode}_mamba{mamba_mode}_ctx{ctx}_bs{batch}",
+                            "kv_mode": kv_mode,
+                            "mamba_mode": mamba_mode,
+                            "metrics": "latency",
+                            "context_lengths": ctx,
+                            "batch_sizes": batch,
+                            "prefill_chunk_size": str(args.prefill_chunk_size),
+                        }
+                    )
+
     worker_outputs = []
-    for idx, (kv_mode, mamba_mode) in enumerate(CONFIGS):
+    launch_specs = []
+    for idx, task in enumerate(tasks):
         gpu = gpus[idx % len(gpus)]
-        worker_out = out_dir / f"worker_{idx}_{kv_mode}_{mamba_mode}.jsonl"
+        worker_out = out_dir / f"{idx:02d}_{task['name']}.jsonl"
+        ready_file = out_dir / f"{idx:02d}_{task['name']}.ready.json"
         if worker_out.exists():
             worker_out.unlink()
+        if ready_file.exists():
+            ready_file.unlink()
         worker_outputs.append(worker_out)
         worker_args = [
             "--model-path",
@@ -67,16 +105,18 @@ def main():
             args.dataset_path,
             "--output",
             str(worker_out),
+            "--ready-file",
+            str(ready_file),
             "--kv-mode",
-            kv_mode,
+            task["kv_mode"],
             "--mamba-mode",
-            mamba_mode,
+            task["mamba_mode"],
             "--metrics",
-            args.metrics,
+            task["metrics"],
             "--context-lengths",
-            args.context_lengths,
+            task["context_lengths"],
             "--batch-sizes",
-            args.batch_sizes,
+            task["batch_sizes"],
             "--decode-length",
             str(args.decode_length),
             "--ppl-max-eval-tokens",
@@ -85,10 +125,14 @@ def main():
             args.dtype,
             "--device",
             f"cuda:{gpu}",
+            "--attn-implementation",
+            args.attn_implementation,
             "--latency-warmup",
             str(args.latency_warmup),
             "--latency-repeats",
             str(args.latency_repeats),
+            "--prefill-chunk-size",
+            task["prefill_chunk_size"],
             "--mamba-group-size",
             str(args.mamba_group_size),
         ]
@@ -105,17 +149,35 @@ def main():
         env["HF_MODULES_CACHE"] = "/home/vrintern/tmp/.hf-modules-cache"
         env["HF_DATASETS_CACHE"] = "/home/vrintern/tmp/.hf-cache/datasets"
         env["XDG_CACHE_HOME"] = "/home/vrintern/tmp/.cache"
-        print(f"[launch] gpu={gpu} kv={kv_mode} mamba={mamba_mode} output={worker_out}", flush=True)
+        print(f"[task] gpu={gpu} {task['name']} output={worker_out}", flush=True)
         if args.dry_run:
             print(" ".join(cmd))
             continue
-        procs.append((kv_mode, mamba_mode, subprocess.Popen(cmd, env=env, cwd=Path(__file__).parent)))
+        launch_specs.append((task, cmd, env, ready_file))
 
     failures = []
-    for kv_mode, mamba_mode, proc in procs:
-        code = proc.wait()
-        if code != 0:
-            failures.append({"kv_mode": kv_mode, "mamba_mode": mamba_mode, "returncode": code})
+    running = []
+    pending = list(launch_specs)
+    max_concurrent = min(len(gpus), len(pending)) if pending else 0
+    while pending or running:
+        while pending and len(running) < max_concurrent:
+            task, cmd, env, ready_file = pending.pop(0)
+            print(f"[launch] {task['name']}", flush=True)
+            proc = subprocess.Popen(cmd, env=env, cwd=Path(__file__).parent)
+            running.append((task, proc))
+            start_wait = time.time()
+            while not ready_file.exists() and proc.poll() is None and time.time() - start_wait < 120:
+                time.sleep(1.0)
+        still_running = []
+        for task, proc in running:
+            code = proc.poll()
+            if code is None:
+                still_running.append((task, proc))
+            elif code != 0:
+                failures.append({"task": task["name"], "returncode": code})
+        running = still_running
+        if running:
+            time.sleep(2.0)
 
     rows = []
     for path in worker_outputs:
@@ -126,6 +188,7 @@ def main():
     payload = {
         "created_unix": time.time(),
         "configs": [{"kv_mode": kv, "mamba_state_mode": mm} for kv, mm in CONFIGS],
+        "tasks": tasks,
         "failures": failures,
         "results": rows,
     }

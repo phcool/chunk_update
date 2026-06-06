@@ -4,3 +4,27 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 results/
+
+# Local model/data/cache artifacts
+models/
+datasets/
+.cache/
+.hf-cache/
+.hf-xet-cache/
+.hf-modules-cache/
+
+# Experiment/profiling outputs
+*.jsonl
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite
+*.log
+
+# Python/build/editor noise
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.ipynb_checkpoints/
+.DS_Store
