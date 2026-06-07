@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-_CODE_ROOT = Path(__file__).resolve().parents[1]
+_CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_CODE_ROOT / "shared"))
 
 os.environ["HF_HOME"] = "/home/vrintern/tmp/.hf-cache"

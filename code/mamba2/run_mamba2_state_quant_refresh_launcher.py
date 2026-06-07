@@ -10,7 +10,7 @@ import sys
 
 _CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_CODE_ROOT / "shared"))
-sys.path.insert(0, str(_CODE_ROOT / "hybrid"))
+sys.path.insert(0, str(_CODE_ROOT / "hybrid" / "chunk_update"))
 
 
 def parse_csv(value: str) -> list[str]:
