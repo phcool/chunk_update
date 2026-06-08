@@ -11,7 +11,7 @@ from typing import Any, Iterable
 import torch
 import torch.nn.functional as F
 
-SHARED_DIR = Path(__file__).resolve().parents[1] / "shared"
+SHARED_DIR = Path(__file__).resolve().parents[2] / "shared"
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
@@ -164,6 +164,8 @@ class EvictionAwarePrefixCache:
         state_size: int = 128,
         eff_weight: float = 0.0,
         use_logical_ts: bool = True,
+        quantize_on_pressure: bool = True,
+        branch_follow_quantization: bool = True,
     ):
         self.root = PrefixCacheNode()
         self.capacity_bytes = int(capacity_bytes)
@@ -175,6 +177,8 @@ class EvictionAwarePrefixCache:
         self.state_size = state_size
         self.eff_weight = eff_weight
         self.use_logical_ts = use_logical_ts
+        self.quantize_on_pressure = quantize_on_pressure
+        self.branch_follow_quantization = branch_follow_quantization
         self.logical_ts = 0
         self.num_nodes = 0
         self.events: list[dict[str, Any]] = []
@@ -200,9 +204,8 @@ class EvictionAwarePrefixCache:
 
     def match_prefix(self, token_ids: list[int], *, update_access: bool = True) -> tuple[list[int], bool, int]:
         self._tick()
-        matched_chunks: list[list[int]] = []
-        prefix_len, last_reusable = self._match_prefix_helper(self.root, tuple(token_ids), matched_chunks)
-        reusable = list(itertools.chain.from_iterable(matched_chunks))
+        prefix_len, last_reusable = self._match_prefix_helper(self.root, tuple(token_ids), None)
+        reusable = last_reusable.token_path() if last_reusable is not None and not last_reusable.is_root else []
         branchoff_required = prefix_len > len(reusable)
         if update_access and last_reusable is not None and not last_reusable.is_root:
             last_reusable.last_access_time = self._now()
@@ -224,6 +227,8 @@ class EvictionAwarePrefixCache:
         return freed
 
     def quantize_for_pressure(self, target_bytes: int) -> int:
+        if not self.quantize_on_pressure:
+            return 0
         freed = 0
         for leaf in sorted(self._collect_leaves(), key=lambda node: node.last_access_time):
             if freed >= target_bytes:
@@ -233,7 +238,8 @@ class EvictionAwarePrefixCache:
             delta = leaf.hybrid_state.quantize_mamba_state(self.group_size)
             freed += delta
             self.events.append({"type": "quantize_leaf", "tokens": len(leaf.token_path()), "freed_bytes": delta})
-            freed += self._quantize_following_branches(leaf, target_bytes - freed)
+            if self.branch_follow_quantization:
+                freed += self._quantize_following_branches(leaf, target_bytes - freed)
         return freed
 
     def total_nbytes(self) -> int:
@@ -324,23 +330,20 @@ class EvictionAwarePrefixCache:
         self,
         node: PrefixCacheNode,
         key: tuple[int, ...],
-        matched_chunks: list[list[int]],
+        last_reusable: PrefixCacheNode | None,
     ) -> tuple[int, PrefixCacheNode | None]:
         if not key:
-            return 0, node
+            return 0, last_reusable
         child = node.children.get(key[0])
         if child is None:
-            return 0, node
+            return 0, last_reusable
         prefix_len = _key_match(child.key, key)
         if prefix_len < len(child.key):
-            return prefix_len, node
+            return prefix_len, last_reusable
         if child.has_state:
-            matched_chunks.append(child.value)
             last_reusable = child
-        else:
-            last_reusable = node
-        suffix_len, suffix_node = self._match_prefix_helper(child, key[prefix_len:], matched_chunks)
-        return prefix_len + suffix_len, suffix_node or last_reusable
+        suffix_len, suffix_node = self._match_prefix_helper(child, key[prefix_len:], last_reusable)
+        return prefix_len + suffix_len, suffix_node
 
     def _quantize_following_branches(self, leaf: PrefixCacheNode, remaining_target: int) -> int:
         freed = 0

@@ -9,9 +9,24 @@ results/
 models/
 datasets/
 .cache/
+.hf_home/
 .hf-cache/
 .hf-xet-cache/
 .hf-modules-cache/
+hf_home/
+huggingface/
+
+# Model weights and dataset shards
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.gguf
+*.onnx
+*.tflite
+*.arrow
+*.parquet
 
 # Experiment/profiling outputs
 *.jsonl
